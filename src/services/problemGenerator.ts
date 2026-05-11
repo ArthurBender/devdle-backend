@@ -132,3 +132,29 @@ export async function generateProblem(
 
   throw lastError;
 }
+
+const COMBINATIONS: [Language, Difficulty][] = [
+  ["javascript", "beginner"],
+  ["javascript", "advanced"],
+  ["python", "beginner"],
+  ["python", "advanced"],
+  ["ruby", "beginner"],
+  ["ruby", "advanced"],
+];
+
+export async function generateAndSaveProblems(date: string): Promise<void> {
+  console.log(`[problemGenerator] generating 6 problems for ${date}...`);
+
+  const generated = await Promise.all(
+    COMBINATIONS.map(([lang, diff]) => generateProblem(lang, diff))
+  );
+
+  const problems = generated.map(({ testCasesInternal, ...rest }, i) => ({
+    ...rest,
+    id: `${date}_${COMBINATIONS[i][0]}_${COMBINATIONS[i][1]}`,
+    testCasesInternal,
+  }));
+
+  await DailyProblemSetModel.create({ date, problems, generatedAt: new Date() });
+  console.log(`[problemGenerator] saved problem set for ${date}`);
+}
