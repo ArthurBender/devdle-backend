@@ -5,7 +5,7 @@ import { MOCK_PROBLEMS } from "../services/mockProblems";
 
 const router = Router();
 
-router.get("/:date", async (req: Request, res: Response) => {
+router.get("/:date", async (req: Request<{ date: string }>, res: Response) => {
   const { date } = req.params;
 
   if (!isValidDate(date)) {
