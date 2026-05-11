@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { DailyProblemSetModel } from "../db/models/DailyProblemSet";
 import { isValidDate, getTodayDateKey } from "../services/dateUtils";
-import { MOCK_PROBLEMS } from "../services/mockProblems";
+import { generateAndSaveProblems } from "../services/problemGenerator";
 
 const router = Router();
 
@@ -33,13 +33,13 @@ router.get("/:date", async (req: Request<{ date: string }>, res: Response) => {
     return;
   }
 
-  // Phase 1 mock — replaced in Phase 2 with Gemini generation
-  const problems = MOCK_PROBLEMS.map((p) => ({
-    ...p,
-    id: `${date}_${p.language}_${p.difficulty}`,
-  }));
+  await generateAndSaveProblems(date);
 
-  res.json({ date, problems, generatedAt: new Date() });
+  const generated = await DailyProblemSetModel
+    .findOne({ date })
+    .select("-problems.testCasesInternal");
+
+  res.json({ date: generated!.date, problems: generated!.problems, generatedAt: generated!.generatedAt });
 });
 
 export default router;
