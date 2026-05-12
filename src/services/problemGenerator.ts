@@ -61,7 +61,7 @@ async function getRecentTitles(): Promise<string[]> {
 async function callGemini(prompt: string): Promise<unknown> {
   const genAI = new GoogleGenerativeAI(config.GEMINI_API_KEY!);
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.1-flash-lite",
     systemInstruction: prompt,
   });
 
@@ -142,7 +142,20 @@ const COMBINATIONS: [Language, Difficulty][] = [
   ["ruby", "advanced"],
 ];
 
-export async function generateAndSaveProblems(date: string): Promise<void> {
+const generationInProgress = new Map<string, Promise<void>>();
+
+export function generateAndSaveProblems(date: string): Promise<void> {
+  const inflight = generationInProgress.get(date);
+  if (inflight) return inflight;
+
+  const promise = _doGenerate(date).finally(() => {
+    generationInProgress.delete(date);
+  });
+  generationInProgress.set(date, promise);
+  return promise;
+}
+
+async function _doGenerate(date: string): Promise<void> {
   console.log(`[problemGenerator] generating 6 problems for ${date}...`);
 
   const generated = await Promise.all(
