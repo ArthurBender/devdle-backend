@@ -33,23 +33,10 @@ router.get("/:date", async (req: Request<{ date: string }>, res: Response) => {
     return;
   }
 
-  try {
-    await generateAndSaveProblems(date);
-  } catch (err: unknown) {
-    const isDuplicateKey =
-      typeof err === "object" && err !== null && (err as { code?: number }).code === 11000;
-    if (!isDuplicateKey) throw err;
-  }
-
-  const generated = await DailyProblemSetModel
-    .findOne({ date })
-    .select("-problems.testCasesInternal");
-
-  if (!generated) {
-    res.status(500).json({ error: "Generation failed." });
-    return;
-  }
-  res.json({ date: generated.date, problems: generated.problems, generatedAt: generated.generatedAt });
+  generateAndSaveProblems(date).catch((err) =>
+    console.error(`[problemGenerator] on-demand generation failed for ${date}:`, err)
+  );
+  res.status(202).json({ message: "Problems are being generated. Check back in a moment." });
 });
 
 export default router;

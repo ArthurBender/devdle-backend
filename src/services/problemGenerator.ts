@@ -7,6 +7,7 @@ import { DailyProblemSetModel } from "../db/models/DailyProblemSet";
 import type { Language, Difficulty, Problem, TestCaseInternal } from "../types";
 
 const PROMPT_PATH = path.join(__dirname, "../prompts/generate-problem.txt");
+const VALIDATE_PROMPT_PATH = path.join(__dirname, "../prompts/validate-problems.txt");
 
 export type GeneratedProblem = Omit<Problem, "id"> & {
   testCasesInternal: TestCaseInternal[];
@@ -43,6 +44,26 @@ const generatedProblemSchema = z
     { message: "testCases and testCasesInternal ids must match in order" }
   );
 
+const validationResultSchema = z.discriminatedUnion("valid", [
+  z.object({ index: z.number(), valid: z.literal(true) }),
+  z.object({
+    index: z.number(),
+    valid: z.literal(false),
+    correctedTestCases: z.object({
+      testCases: z.array(z.object({ id: z.string(), name: z.string() })),
+      testCasesInternal: z.array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          args: z.array(z.unknown()),
+          expected: z.unknown(),
+        })
+      ),
+    }),
+  }),
+]);
+const validationResponseSchema = z.array(validationResultSchema);
+
 async function getRecentTitles(): Promise<string[]> {
   const since = new Date();
   since.setUTCDate(since.getUTCDate() - 30);
@@ -58,14 +79,14 @@ async function getRecentTitles(): Promise<string[]> {
   );
 }
 
-async function callGemini(prompt: string): Promise<unknown> {
+async function callGemini(systemPrompt: string, userContent = "generate"): Promise<unknown> {
   const genAI = new GoogleGenerativeAI(config.GEMINI_API_KEY!);
   const model = genAI.getGenerativeModel({
-    model: "gemini-3.1-flash-lite",
-    systemInstruction: prompt,
+    model: "gemini-2.5-flash-lite",
+    systemInstruction: systemPrompt,
   });
 
-  const result = await model.generateContent("generate");
+  const result = await model.generateContent(userContent);
   let text = result.response.text().trim();
 
   // Strip markdown fences if the model wraps the JSON despite instructions
@@ -76,7 +97,16 @@ async function callGemini(prompt: string): Promise<unknown> {
   return JSON.parse(text);
 }
 
-const RETRY_DELAYS_MS = [0, 2000, 4000];
+function getRetryDelayMs(err: unknown, attempt: number): number {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("429") || msg.includes("Too Many Requests")) {
+    return attempt === 1 ? 60_000 : 120_000; // 1 min, 2 min
+  }
+  if (msg.includes("503") || msg.includes("Service Unavailable")) {
+    return attempt === 1 ? 10_000 : 20_000; // 10s, 20s
+  }
+  return attempt === 1 ? 2_000 : 4_000; // fallback: 2s, 4s
+}
 
 export async function generateProblem(
   language: Language,
@@ -101,36 +131,51 @@ export async function generateProblem(
     .replace(/{{DIFFICULTY}}/g, difficulty)
     .replace(/{{AVOID_TITLES}}/g, avoidList);
 
-  let lastError: unknown;
+  const raw = await callGemini(prompt);
+  const parsed = generatedProblemSchema.parse(raw);
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, RETRY_DELAYS_MS[attempt])
-      );
-    }
-
-    try {
-      const raw = await callGemini(prompt);
-      const parsed = generatedProblemSchema.parse(raw);
-
-      if (parsed.language !== language || parsed.difficulty !== difficulty) {
-        throw new Error(
-          `Gemini returned wrong language/difficulty: ${parsed.language}/${parsed.difficulty}`
-        );
-      }
-
-      return parsed as GeneratedProblem;
-    } catch (err) {
-      lastError = err;
-      console.warn(
-        `[problemGenerator] attempt ${attempt + 1}/3 failed (${language}/${difficulty}):`,
-        err instanceof Error ? err.message : err
-      );
-    }
+  if (parsed.language !== language || parsed.difficulty !== difficulty) {
+    throw new Error(
+      `Gemini returned wrong language/difficulty: ${parsed.language}/${parsed.difficulty}`
+    );
   }
 
-  throw lastError;
+  return parsed as GeneratedProblem;
+}
+
+async function validateAndCorrectProblems(
+  problems: GeneratedProblem[]
+): Promise<GeneratedProblem[]> {
+  const systemPrompt = await fs.promises.readFile(VALIDATE_PROMPT_PATH, "utf-8");
+  const userContent = JSON.stringify(
+    problems.map(({ language, difficulty, title, description, starterCode, testCases, testCasesInternal }) => ({
+      language,
+      difficulty,
+      title,
+      description,
+      starterCode,
+      testCases,
+      testCasesInternal,
+    }))
+  );
+
+  const raw = await callGemini(systemPrompt, userContent);
+  const results = validationResponseSchema.parse(raw);
+
+  const corrected = [...problems];
+  for (const result of results) {
+    if (!result.valid) {
+      console.warn(
+        `[problemGenerator] validation corrected test cases for: "${problems[result.index].title}"`
+      );
+      corrected[result.index] = {
+        ...corrected[result.index],
+        testCases: result.correctedTestCases.testCases,
+        testCasesInternal: result.correctedTestCases.testCasesInternal,
+      };
+    }
+  }
+  return corrected;
 }
 
 const COMBINATIONS: [Language, Difficulty][] = [
@@ -158,11 +203,49 @@ export function generateAndSaveProblems(date: string): Promise<void> {
 async function _doGenerate(date: string): Promise<void> {
   console.log(`[problemGenerator] generating 6 problems for ${date}...`);
 
-  const generated = await Promise.all(
-    COMBINATIONS.map(([lang, diff]) => generateProblem(lang, diff))
-  );
+  const generated: GeneratedProblem[] = [];
+  for (const [lang, diff] of COMBINATIONS) {
+    let lastError: unknown;
+    let problem: GeneratedProblem | undefined;
 
-  const problems = generated.map(({ testCasesInternal, ...rest }, i) => ({
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        const delay = getRetryDelayMs(lastError, attempt);
+        console.warn(
+          `[problemGenerator] waiting ${delay / 1000}s before retry ${attempt + 1}/3 (${lang}/${diff})...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+
+      try {
+        console.log(`[problemGenerator] generating ${lang}/${diff} (attempt ${attempt + 1}/3)...`);
+        problem = await generateProblem(lang, diff);
+        break;
+      } catch (err) {
+        lastError = err;
+        console.warn(
+          `[problemGenerator] attempt ${attempt + 1}/3 failed (${lang}/${diff}):`,
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
+    if (!problem) throw lastError;
+    generated.push(problem);
+  }
+
+  let validated = generated;
+  try {
+    console.log(`[problemGenerator] validating test cases for ${date}...`);
+    validated = await validateAndCorrectProblems(generated);
+  } catch (err) {
+    console.warn(
+      `[problemGenerator] test case validation failed, saving unvalidated problems:`,
+      err instanceof Error ? err.message : err
+    );
+  }
+
+  const problems = validated.map(({ testCasesInternal, ...rest }, i) => ({
     ...rest,
     id: `${date}_${COMBINATIONS[i][0]}_${COMBINATIONS[i][1]}`,
     testCasesInternal,
