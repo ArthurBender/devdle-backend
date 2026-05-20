@@ -1,4 +1,5 @@
 import express from "express";
+import cors from "cors";
 import cron from "node-cron";
 import { config } from "./config";
 import { connectDB } from "./db/connection";
@@ -10,12 +11,17 @@ const app = express();
 
 app.use(express.json());
 
-app.get("/api/health", (_req, res) => {
+const corsOptions: cors.CorsOptions = {
+  origin: config.CORS_ORIGIN,
+  methods: ["GET"],
+};
+
+app.get("/api/health", cors(corsOptions), (_req, res) => {
   res.json({ status: "ok", db: "connected" });
 });
 
-app.use("/api/problems", problemsRouter);
-app.use("/api/internal", internalRouter);
+app.use("/api/problems", cors(corsOptions), problemsRouter);
+app.use("/api/internal", cors(corsOptions), internalRouter);
 
 // Pre-generate tomorrow's problems at 00:05 UTC every day
 cron.schedule("5 0 * * *", async () => {

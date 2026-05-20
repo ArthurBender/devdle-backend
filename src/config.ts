@@ -8,6 +8,7 @@ const schema = z.object({
   PORT: z.coerce.number().default(3001),
   GEMINI_API_KEY: z.string().optional(),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  CORS_ORIGIN: z.string().default("*"),
 });
 
 export const config = schema.parse(process.env);
