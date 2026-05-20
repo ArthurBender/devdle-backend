@@ -4,7 +4,7 @@ COPY package*.json ./
 RUN npm ci
 COPY tsconfig.json .
 COPY src/ ./src/
-RUN npm run build
+RUN npm run build && cp -r src/prompts dist/prompts
 
 FROM node:25-alpine
 WORKDIR /app
